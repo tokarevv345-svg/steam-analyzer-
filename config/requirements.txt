@@ -1,0 +1,24 @@
+# Web / API
+fastapi~=0.115.0
+uvicorn[standard]~=0.34.0
+
+# База данных
+sqlalchemy~=2.0.0
+alembic~=1.14.0
+psycopg[binary]~=3.2.0
+
+# Планировщик и фоновые задачи
+apscheduler~=3.11.0
+celery~=5.4.0
+redis~=5.2.0
+
+# Telegram-бот
+aiogram~=3.15.0
+
+# HTTP-клиент для Collector
+httpx~=0.28.0
+
+# Конфигурация
+python-dotenv~=1.0.0
+pydantic~=2.10.0
+pydantic-settings~=2.7.0
