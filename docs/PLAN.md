@@ -44,9 +44,9 @@
 
 ## Этап 6 — Collector
 
-Статус: не начат
+Статус: готово (см. `src/steam_analyzer_data/collector/steam_market_client.py`)
 
-Только получение данных Steam. Ничего больше.
+Только получение данных Steam. Ничего больше. Используется `priceoverview` (публичный, без логина) — решение осознанно, `pricehistory` с авторизацией отложен на будущее (см. `docs/SCOPE.md`).
 
 ## Этап 7 — Сохранение данных в PostgreSQL
 
