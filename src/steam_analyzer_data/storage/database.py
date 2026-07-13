@@ -4,6 +4,7 @@ import os
 
 from dotenv import load_dotenv
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
 
 load_dotenv()
 
@@ -26,3 +27,7 @@ def check_connection() -> bool:
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
     return True
+
+
+def create_session_factory() -> sessionmaker[Session]:
+    return sessionmaker(bind=create_db_engine())

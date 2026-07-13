@@ -50,7 +50,9 @@
 
 ## Этап 7 — Сохранение данных в PostgreSQL
 
-Статус: не начат
+Статус: готово (см. `src/steam_analyzer_data/storage/repository.py`, `alembic.ini`)
+
+`get_or_create_item()` + `save_price_snapshot()`. При автосоздании предмета `item_type`/`rarity` заполняются плейсхолдером `"unknown"` (обогащение — отдельная будущая задача), `exterior`/`stattrak` парсятся из `market_hash_name`. Создание таблиц закреплено через Alembic-миграцию (`src/steam_analyzer_data/storage/migrations/`), а не ручной `create_all()`. Проверено полным циклом: Steam → сохранение → чтение обратно.
 
 ## Этап 8 — APScheduler
 
