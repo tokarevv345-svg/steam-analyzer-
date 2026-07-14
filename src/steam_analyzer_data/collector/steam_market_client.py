@@ -17,6 +17,8 @@ load_dotenv()
 STEAM_PROXY_URL = os.getenv("STEAM_PROXY_URL") or None
 
 STEAM_MARKET_PRICEOVERVIEW_URL = "https://steamcommunity.com/market/priceoverview/"
+STEAM_MARKET_SEARCH_URL = "https://steamcommunity.com/market/search"
+STEAM_MARKET_SEARCH_RENDER_URL = "https://steamcommunity.com/market/search/render/"
 USD_CURRENCY_CODE = 1
 REQUEST_TIMEOUT_SECONDS = 10.0
 
@@ -62,10 +64,14 @@ def _wait_for_rate_limit() -> None:
     _last_request_at = time.monotonic()
 
 
-def _get_with_backoff(url: str, params: dict[str, str | int]) -> httpx.Response:
+def _get_with_backoff(
+    url: str,
+    params: dict[str, str | int],
+    extra_headers: dict[str, str] | None = None,
+) -> httpx.Response:
     for attempt in range(MAX_RETRIES_ON_RATE_LIMIT + 1):
         _wait_for_rate_limit()
-        response = _client.get(url, params=params)
+        response = _client.get(url, params=params, headers=extra_headers)
 
         if response.status_code != 429:
             return response
@@ -91,6 +97,13 @@ class SteamMarketError(Exception):
 class PriceOverview:
     price: Decimal
     volume: int | None
+
+
+@dataclass(frozen=True)
+class MarketSearchItem:
+    hash_name: str
+    sell_listings: int
+    sell_price: Decimal
 
 
 def _parse_price(raw_price: str) -> Decimal:
@@ -136,3 +149,86 @@ def fetch_price_overview(
         price=_parse_price(lowest_price),
         volume=_parse_volume(data.get("volume")),
     )
+
+
+MAX_RETRIES_ON_STALE_BATCH = 3
+
+
+def fetch_market_items(
+    app_id: int,
+    total: int,
+    batch_size: int = 5,
+    batch_delay_seconds: float = 5.0,
+    sort_column: str = "quantity",
+    sort_dir: str = "desc",
+) -> list[MarketSearchItem]:
+    search_page_url = f"{STEAM_MARKET_SEARCH_URL}?appid={app_id}"
+    referer_headers = {
+        "Referer": search_page_url,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    # Разогрев: обычный заход на страницу поиска даёт анонимные cookies,
+    # без которых Steam режет запросы к search/render как подозрительные.
+    _client.get(STEAM_MARKET_SEARCH_URL, params={"appid": app_id})
+
+    items: list[MarketSearchItem] = []
+    seen_hash_names: set[str] = set()
+    start = 0
+    stale_retries = 0
+
+    while len(items) < total:
+        count = min(batch_size, total - len(items))
+        response = _get_with_backoff(
+            STEAM_MARKET_SEARCH_RENDER_URL,
+            {
+                "query": "",
+                "appid": app_id,
+                "norender": 1,
+                "count": count,
+                "start": start,
+                "sort_column": sort_column,
+                "sort_dir": sort_dir,
+            },
+            extra_headers=referer_headers,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if not data.get("success"):
+            raise SteamMarketError(f"Steam не вернул результаты поиска (appid={app_id})")
+
+        results = data.get("results", [])
+        if not results:
+            break
+
+        # Steam иногда отдаёт ту же страницу повторно (внутреннее кэширование
+        # на его стороне) даже при другом start. Если вся пачка уже видена —
+        # это не новые данные, а "залипшая" страница: ждём и пробуем тот же start снова.
+        new_results = [r for r in results if r["hash_name"] not in seen_hash_names]
+        if not new_results:
+            stale_retries += 1
+            if stale_retries > MAX_RETRIES_ON_STALE_BATCH:
+                raise SteamMarketError(
+                    f"Steam повторяет одну и ту же страницу поиска (start={start}) "
+                    f"после {MAX_RETRIES_ON_STALE_BATCH} повторных попыток"
+                )
+            time.sleep(batch_delay_seconds)
+            continue
+
+        stale_retries = 0
+        for raw_item in new_results:
+            seen_hash_names.add(raw_item["hash_name"])
+            items.append(
+                MarketSearchItem(
+                    hash_name=raw_item["hash_name"],
+                    sell_listings=int(raw_item.get("sell_listings", 0)),
+                    sell_price=Decimal(raw_item["sell_price"]) / 100,
+                )
+            )
+
+        start += count
+        if len(items) < total:
+            time.sleep(batch_delay_seconds)
+
+    return items
