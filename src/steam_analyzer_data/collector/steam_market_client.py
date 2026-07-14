@@ -12,6 +12,19 @@ STEAM_MARKET_PRICEOVERVIEW_URL = "https://steamcommunity.com/market/priceovervie
 USD_CURRENCY_CODE = 1
 REQUEST_TIMEOUT_SECONDS = 10.0
 
+# Заголовки, маскирующие запрос под обычный браузер, чтобы Steam
+# не резал ответы у "голого" HTTP-клиента.
+DEFAULT_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/138.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+}
+
 # Rate limiting: пауза между запросами со случайным разбросом (jitter),
 # чтобы не идти к Steam ровными интервалами.
 MIN_REQUEST_DELAY_SECONDS = 0.8
@@ -21,7 +34,11 @@ MAX_REQUEST_DELAY_SECONDS = 1.5
 MAX_RETRIES_ON_RATE_LIMIT = 3
 BASE_BACKOFF_SECONDS = 5.0
 
-_client = httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False)
+_client = httpx.Client(
+    timeout=REQUEST_TIMEOUT_SECONDS,
+    trust_env=False,
+    headers=DEFAULT_HEADERS,
+)
 atexit.register(_client.close)
 
 _last_request_at: float = 0.0
