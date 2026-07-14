@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -9,6 +9,11 @@ from sqlalchemy.orm import Session
 from .models import Item, PriceSnapshot
 
 UNKNOWN_PLACEHOLDER = "unknown"
+
+# Предохранитель от повторных/случайных записей: если для предмета уже есть
+# снепшот новее этого порога, новый не сохраняем. Не мешает штатному сбору
+# (интервал планировщика — 60 минут), но гасит дубли от ручных перезапусков.
+MIN_SNAPSHOT_INTERVAL = timedelta(minutes=5)
 
 _EXTERIOR_VALUES = {
     "Factory New",
@@ -57,7 +62,19 @@ def save_price_snapshot(
     price: Decimal,
     volume: int | None,
     collected_at: datetime,
-) -> PriceSnapshot:
+) -> PriceSnapshot | None:
+    last_snapshot = session.scalar(
+        select(PriceSnapshot)
+        .where(PriceSnapshot.item_id == item.id)
+        .order_by(PriceSnapshot.collected_at.desc())
+        .limit(1)
+    )
+    if (
+        last_snapshot is not None
+        and collected_at - last_snapshot.collected_at < MIN_SNAPSHOT_INTERVAL
+    ):
+        return None
+
     snapshot = PriceSnapshot(
         item_id=item.id,
         price=price,
