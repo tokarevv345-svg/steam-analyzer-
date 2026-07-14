@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import atexit
+import os
 import random
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Необязательный прокси для запросов к Steam, например "socks5://127.0.0.1:10808".
+# Если переменная не задана (или пустая) — запрос идёт напрямую, как раньше.
+STEAM_PROXY_URL = os.getenv("STEAM_PROXY_URL") or None
 
 STEAM_MARKET_PRICEOVERVIEW_URL = "https://steamcommunity.com/market/priceoverview/"
 USD_CURRENCY_CODE = 1
@@ -38,6 +46,7 @@ _client = httpx.Client(
     timeout=REQUEST_TIMEOUT_SECONDS,
     trust_env=False,
     headers=DEFAULT_HEADERS,
+    proxy=STEAM_PROXY_URL,
 )
 atexit.register(_client.close)
 
