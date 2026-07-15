@@ -6,6 +6,7 @@ import random
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
@@ -17,6 +18,7 @@ load_dotenv()
 STEAM_PROXY_URL = os.getenv("STEAM_PROXY_URL") or None
 
 STEAM_MARKET_PRICEOVERVIEW_URL = "https://steamcommunity.com/market/priceoverview/"
+STEAM_MARKET_LISTING_URL = "https://steamcommunity.com/market/listings"
 STEAM_MARKET_SEARCH_URL = "https://steamcommunity.com/market/search"
 STEAM_MARKET_SEARCH_RENDER_URL = "https://steamcommunity.com/market/search/render/"
 USD_CURRENCY_CODE = 1
@@ -120,17 +122,48 @@ def _parse_volume(raw_volume: str | None) -> int | None:
     return int(raw_volume.replace(",", ""))
 
 
+def _ensure_session_warmed_up(app_id: int, market_hash_name: str) -> None:
+    # Cookies не привязаны к конкретному предмету — разогреваем сессию, только
+    # если её ещё не было или она протухла, а не перед каждым запросом цены.
+    # Иначе на каждый предмет из TRACKED_ITEMS уходил бы отдельный "новый визит",
+    # что само по себе выглядит подозрительно для антибота Steam.
+    _client.cookies.jar.clear_expired_cookies()
+    if len(_client.cookies) > 0:
+        return
+
+    listing_url = f"{STEAM_MARKET_LISTING_URL}/{app_id}/{market_hash_name}"
+    response = _get_with_backoff(listing_url, {})
+    response.raise_for_status()
+
+
 def fetch_price_overview(
     app_id: int,
     market_hash_name: str,
     currency: int = USD_CURRENCY_CODE,
 ) -> PriceOverview:
+    _ensure_session_warmed_up(app_id, market_hash_name)
+
+    listing_url = f"{STEAM_MARKET_LISTING_URL}/{app_id}/{market_hash_name}"
+    referer_headers = {"Referer": listing_url}
     params: dict[str, str | int] = {
         "appid": app_id,
         "market_hash_name": market_hash_name,
         "currency": currency,
     }
-    response = _get_with_backoff(STEAM_MARKET_PRICEOVERVIEW_URL, params)
+    response = _get_with_backoff(
+        STEAM_MARKET_PRICEOVERVIEW_URL, params, extra_headers=referer_headers
+    )
+
+    if response.status_code == 429:
+        # Cookies формально не протухли (иначе _ensure_session_warmed_up уже бы
+        # их обновила), но Steam всё равно режет — считаем сессию недействительной,
+        # принудительно обновляем её и пробуем ровно один раз ещё.
+        _client.cookies.clear()
+        _ensure_session_warmed_up(app_id, market_hash_name)
+        response = _get_with_backoff(
+            STEAM_MARKET_PRICEOVERVIEW_URL, params, extra_headers=referer_headers
+        )
+
     response.raise_for_status()
     data = response.json()
 
@@ -154,11 +187,23 @@ def fetch_price_overview(
 MAX_RETRIES_ON_STALE_BATCH = 3
 
 
+def _parse_market_search_item(raw_item: dict[str, Any]) -> MarketSearchItem:
+    try:
+        return MarketSearchItem(
+            hash_name=str(raw_item["hash_name"]),
+            sell_listings=int(raw_item.get("sell_listings", 0)),
+            sell_price=Decimal(raw_item["sell_price"]) / 100,
+        )
+    except (KeyError, InvalidOperation, TypeError) as exc:
+        raise SteamMarketError(
+            f"Не удалось разобрать предмет из результатов поиска: {raw_item!r}"
+        ) from exc
+
+
 def fetch_market_items(
     app_id: int,
     total: int,
-    batch_size: int = 5,
-    batch_delay_seconds: float = 5.0,
+    request_delay_seconds: float = 8.0,
     sort_column: str = "quantity",
     sort_dir: str = "desc",
 ) -> list[MarketSearchItem]:
@@ -170,7 +215,10 @@ def fetch_market_items(
 
     # Разогрев: обычный заход на страницу поиска даёт анонимные cookies,
     # без которых Steam режет запросы к search/render как подозрительные.
-    _client.get(STEAM_MARKET_SEARCH_URL, params={"appid": app_id})
+    # Идёт через тот же backoff, что и остальные запросы, и падает громко,
+    # если разогреться не удалось, — иначе дальше пойдём без cookies вслепую.
+    warmup_response = _get_with_backoff(STEAM_MARKET_SEARCH_URL, {"appid": app_id})
+    warmup_response.raise_for_status()
 
     items: list[MarketSearchItem] = []
     seen_hash_names: set[str] = set()
@@ -178,14 +226,17 @@ def fetch_market_items(
     stale_retries = 0
 
     while len(items) < total:
-        count = min(batch_size, total - len(items))
+        # count — сколько предметов мы просим. Steam его не соблюдает: проверено
+        # живьём на count=1 и count=100 — оба раза в ответе pagesize=10, то есть
+        # реальный размер страницы Steam выбирает сам. Поэтому ниже используется
+        # не count, а len(results) — то, что реально пришло.
         response = _get_with_backoff(
             STEAM_MARKET_SEARCH_RENDER_URL,
             {
                 "query": "",
                 "appid": app_id,
                 "norender": 1,
-                "count": count,
+                "count": total - len(items),
                 "start": start,
                 "sort_column": sort_column,
                 "sort_dir": sort_dir,
@@ -202,10 +253,16 @@ def fetch_market_items(
         if not results:
             break
 
+        try:
+            new_results = [r for r in results if r["hash_name"] not in seen_hash_names]
+        except KeyError as exc:
+            raise SteamMarketError(
+                f"В результатах поиска нет поля {exc} (appid={app_id})"
+            ) from exc
+
         # Steam иногда отдаёт ту же страницу повторно (внутреннее кэширование
         # на его стороне) даже при другом start. Если вся пачка уже видена —
         # это не новые данные, а "залипшая" страница: ждём и пробуем тот же start снова.
-        new_results = [r for r in results if r["hash_name"] not in seen_hash_names]
         if not new_results:
             stale_retries += 1
             if stale_retries > MAX_RETRIES_ON_STALE_BATCH:
@@ -213,22 +270,21 @@ def fetch_market_items(
                     f"Steam повторяет одну и ту же страницу поиска (start={start}) "
                     f"после {MAX_RETRIES_ON_STALE_BATCH} повторных попыток"
                 )
-            time.sleep(batch_delay_seconds)
+            time.sleep(request_delay_seconds)
             continue
 
         stale_retries = 0
         for raw_item in new_results:
-            seen_hash_names.add(raw_item["hash_name"])
-            items.append(
-                MarketSearchItem(
-                    hash_name=raw_item["hash_name"],
-                    sell_listings=int(raw_item.get("sell_listings", 0)),
-                    sell_price=Decimal(raw_item["sell_price"]) / 100,
-                )
-            )
+            if len(items) >= total:
+                break
+            item = _parse_market_search_item(raw_item)
+            seen_hash_names.add(item.hash_name)
+            items.append(item)
 
-        start += count
+        # Продвигаем позицию по реально полученному количеству, а не по count —
+        # иначе следующий запрос частично пересечётся с уже обработанной страницей.
+        start += len(results)
         if len(items) < total:
-            time.sleep(batch_delay_seconds)
+            time.sleep(request_delay_seconds)
 
     return items

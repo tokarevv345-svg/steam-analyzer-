@@ -11,9 +11,11 @@ from .models import Item, PriceSnapshot
 UNKNOWN_PLACEHOLDER = "unknown"
 
 # Предохранитель от повторных/случайных записей: если для предмета уже есть
-# снепшот новее этого порога, новый не сохраняем. Не мешает штатному сбору
-# (интервал планировщика — 60 минут), но гасит дубли от ручных перезапусков.
-MIN_SNAPSHOT_INTERVAL = timedelta(minutes=5)
+# снепшот в пределах этого окна ДО ИЛИ ПОСЛЕ новой точки — новый не сохраняем.
+# Смотрим в обе стороны от времени, а не только "после" — иначе исторические
+# точки backfill'а (которые раньше уже существующих) ошибочно посчитались бы
+# "слишком свежими" и отбрасывались бы все подряд.
+MIN_SNAPSHOT_INTERVAL = timedelta(minutes=1)
 
 _EXTERIOR_VALUES = {
     "Factory New",
@@ -63,16 +65,16 @@ def save_price_snapshot(
     volume: int | None,
     collected_at: datetime,
 ) -> PriceSnapshot | None:
-    last_snapshot = session.scalar(
+    nearby_snapshot = session.scalar(
         select(PriceSnapshot)
-        .where(PriceSnapshot.item_id == item.id)
-        .order_by(PriceSnapshot.collected_at.desc())
+        .where(
+            PriceSnapshot.item_id == item.id,
+            PriceSnapshot.collected_at >= collected_at - MIN_SNAPSHOT_INTERVAL,
+            PriceSnapshot.collected_at <= collected_at + MIN_SNAPSHOT_INTERVAL,
+        )
         .limit(1)
     )
-    if (
-        last_snapshot is not None
-        and collected_at - last_snapshot.collected_at < MIN_SNAPSHOT_INTERVAL
-    ):
+    if nearby_snapshot is not None:
         return None
 
     snapshot = PriceSnapshot(

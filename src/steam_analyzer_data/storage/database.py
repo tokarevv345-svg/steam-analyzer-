@@ -18,8 +18,14 @@ def get_database_url() -> str:
     return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
 
 
+_engine: Engine | None = None
+
+
 def create_db_engine() -> Engine:
-    return create_engine(get_database_url())
+    global _engine
+    if _engine is None:
+        _engine = create_engine(get_database_url())
+    return _engine
 
 
 def check_connection() -> bool:
