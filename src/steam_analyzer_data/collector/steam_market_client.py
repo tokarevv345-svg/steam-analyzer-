@@ -22,6 +22,7 @@ STEAM_MARKET_LISTING_URL = "https://steamcommunity.com/market/listings"
 STEAM_MARKET_SEARCH_URL = "https://steamcommunity.com/market/search"
 STEAM_MARKET_SEARCH_RENDER_URL = "https://steamcommunity.com/market/search/render/"
 USD_CURRENCY_CODE = 1
+RUB_CURRENCY_CODE = 5
 REQUEST_TIMEOUT_SECONDS = 10.0
 
 # Заголовки, маскирующие запрос под обычный браузер, чтобы Steam
@@ -108,10 +109,35 @@ class MarketSearchItem:
     sell_price: Decimal
 
 
+# Символы/суффиксы валют, которые Steam добавляет к цене — по мере надобности
+# дополнять сюда, а не переписывать саму логику разбора.
+_CURRENCY_MARKERS = ("$", "руб.")
+
+
 def _parse_price(raw_price: str) -> Decimal:
-    cleaned = raw_price.replace("$", "").replace(",", "").strip()
+    cleaned = raw_price
+    for marker in _CURRENCY_MARKERS:
+        cleaned = cleaned.replace(marker, "")
+    cleaned = cleaned.replace("\xa0", "").replace(" ", "").strip()
+
+    # "," и "." по-разному значат разделитель тысяч/десятичных в разных
+    # валютах Steam (доллар: "1,234.56" — запятая тысячи, точка дробная;
+    # рубль: "3302,17" — запятая дробная, тысячи через пробел). Последний
+    # из двух символов в строке — всегда десятичный разделитель, остальные
+    # вхождения — разделители тысяч, их просто убираем.
+    last_comma = cleaned.rfind(",")
+    last_dot = cleaned.rfind(".")
+    decimal_sep_pos = max(last_comma, last_dot)
+
+    if decimal_sep_pos == -1:
+        normalized = cleaned
+    else:
+        integer_part = cleaned[:decimal_sep_pos].replace(",", "").replace(".", "")
+        fractional_part = cleaned[decimal_sep_pos + 1 :]
+        normalized = f"{integer_part}.{fractional_part}"
+
     try:
-        return Decimal(cleaned)
+        return Decimal(normalized)
     except InvalidOperation as exc:
         raise SteamMarketError(f"Не удалось разобрать цену: {raw_price!r}") from exc
 
@@ -182,6 +208,21 @@ def fetch_price_overview(
         price=_parse_price(lowest_price),
         volume=_parse_volume(data.get("volume")),
     )
+
+
+def fetch_usd_rub_rate(app_id: int, market_hash_name: str) -> Decimal:
+    """Текущий курс USD/RUB (сколько рублей за доллар), вычисленный по цене
+    одного и того же предмета в обеих валютах через priceoverview — анонимно,
+    без cookie. Используется, чтобы конвертировать рублёвые price_snapshots
+    в доллары в момент анализа, а не при сборе (собираем и храним всё
+    в рублях — валюте, в которой Steam реально отдаёт данные аккаунту)."""
+    usd_overview = fetch_price_overview(app_id, market_hash_name, currency=USD_CURRENCY_CODE)
+    rub_overview = fetch_price_overview(app_id, market_hash_name, currency=RUB_CURRENCY_CODE)
+    if usd_overview.price == 0:
+        raise SteamMarketError(
+            f"Не удалось вычислить курс USD/RUB по {market_hash_name!r}: цена в USD равна нулю"
+        )
+    return rub_overview.price / usd_overview.price
 
 
 MAX_RETRIES_ON_STALE_BATCH = 3

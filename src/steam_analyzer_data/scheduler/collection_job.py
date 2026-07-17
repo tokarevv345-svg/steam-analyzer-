@@ -6,7 +6,11 @@ from datetime import UTC, datetime
 import httpx
 from apscheduler.schedulers.blocking import BlockingScheduler  # type: ignore[import-untyped]
 
-from ..collector.steam_market_client import SteamMarketError, fetch_price_overview
+from ..collector.steam_market_client import (
+    RUB_CURRENCY_CODE,
+    SteamMarketError,
+    fetch_price_overview,
+)
 from ..storage.database import create_session_factory
 from ..storage.repository import get_or_create_item, save_price_snapshot
 
@@ -27,7 +31,13 @@ def collect_once() -> None:
     with session_factory() as session:
         for market_hash_name in TRACKED_ITEMS:
             try:
-                overview = fetch_price_overview(APP_ID_CS2, market_hash_name)
+                # Собираем и храним в рублях — валюте, в которой Steam реально
+                # отдаёт данные этому аккаунту (see docs/SCOPE.md, запись от
+                # 15.07.2026). Конвертация в доллары — на стороне Analyzer,
+                # в момент использования, не здесь.
+                overview = fetch_price_overview(
+                    APP_ID_CS2, market_hash_name, currency=RUB_CURRENCY_CODE
+                )
             except (
                 SteamMarketError,
                 httpx.HTTPStatusError,

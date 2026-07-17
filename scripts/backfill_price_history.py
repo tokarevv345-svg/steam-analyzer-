@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from src.steam_analyzer_data.collector.steam_market_client import (
     DEFAULT_HEADERS,
     STEAM_MARKET_LISTING_URL,
+    STEAM_MARKET_SEARCH_URL,
     STEAM_PROXY_URL,
     SteamMarketError,
 )
@@ -57,9 +58,22 @@ def _parse_history_point(row: list[object]) -> tuple[datetime, Decimal, int]:
         raise SteamMarketError(f"Не удалось разобрать точку истории цен: {row!r}") from exc
 
 
+def _ensure_sessionid() -> None:
+    # Без cookie sessionid Steam на pricehistory игнорирует параметр currency
+    # и молча отдаёт цены в валюте аккаунта (обнаружено: цены приходили в
+    # рублях, ~76x завышены против USD), даже при валидном steamLoginSecure.
+    # Настоящий браузер всегда шлёт sessionid вместе с login-cookie — здесь
+    # добираем его одним анонимным заходом, если его ещё нет в клиенте.
+    if "sessionid" in _client.cookies:
+        return
+    _client.get(STEAM_MARKET_SEARCH_URL)
+
+
 def fetch_price_history(
     app_id: int, market_hash_name: str, cookie: str
 ) -> list[tuple[datetime, Decimal, int]]:
+    _ensure_sessionid()
+
     listing_url = f"{STEAM_MARKET_LISTING_URL}/{app_id}/{market_hash_name}"
     params: dict[str, str | int] = {
         "appid": app_id,
