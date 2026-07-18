@@ -463,6 +463,19 @@ def resolve_item_nameid(app_id: int, market_hash_name: str) -> int:
     return nameid
 
 
+# itemordershistogram не отдаёт готовое число ордеров отдельным полем —
+# полей "sell_order_count"/"buy_order_count" в ответе просто нет (проверено
+# вживую 18.07.2026, ни разу не встречались). Реальное количество зашито
+# последним элементом в *_order_graph — это накопленная (cumulative) кривая
+# вида [[цена, накопленное_количество, описание], ...], упорядоченная от
+# лучшей цены наружу, так что последний элемент несёт наибольшее накопленное
+# значение — общее число ордеров с этой стороны стакана.
+def _parse_order_count_from_graph(order_graph: list[list[Any]] | None) -> int:
+    if not order_graph:
+        return 0
+    return int(order_graph[-1][1])
+
+
 def fetch_order_histogram(
     item_nameid: int,
     currency: int = USD_CURRENCY_CODE,
@@ -496,6 +509,6 @@ def fetch_order_histogram(
     return OrderHistogram(
         lowest_sell_order=Decimal(str(data["lowest_sell_order"])) / 100,
         highest_buy_order=Decimal(str(data["highest_buy_order"])) / 100,
-        sell_order_count=_parse_volume(data.get("sell_order_count")),
-        buy_order_count=_parse_volume(data.get("buy_order_count")),
+        sell_order_count=_parse_order_count_from_graph(data.get("sell_order_graph")),
+        buy_order_count=_parse_order_count_from_graph(data.get("buy_order_graph")),
     )
