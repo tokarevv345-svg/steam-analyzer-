@@ -9,10 +9,11 @@ from apscheduler.schedulers.blocking import BlockingScheduler  # type: ignore[im
 from ..collector.steam_market_client import (
     RUB_CURRENCY_CODE,
     SteamMarketError,
-    fetch_price_overview,
+    fetch_order_histogram,
+    resolve_item_nameid,
 )
 from ..storage.database import create_session_factory
-from ..storage.repository import get_or_create_item, save_price_snapshot
+from ..storage.repository import get_or_create_item, save_item_nameid, save_price_snapshot
 
 APP_ID_CS2 = 730
 
@@ -30,14 +31,29 @@ def collect_once() -> None:
     session_factory = create_session_factory()
     with session_factory() as session:
         for market_hash_name in TRACKED_ITEMS:
+            item = get_or_create_item(session, market_hash_name)
             try:
-                # Собираем и храним в рублях — валюте, в которой Steam реально
-                # отдаёт данные этому аккаунту (see docs/SCOPE.md, запись от
-                # 15.07.2026). Конвертация в доллары — на стороне Analyzer,
-                # в момент использования, не здесь.
-                overview = fetch_price_overview(
-                    APP_ID_CS2, market_hash_name, currency=RUB_CURRENCY_CODE
-                )
+                # item_nameid резолвится один раз на предмет (через сторонний
+                # датасет, см. resolve_item_nameid) и кэшируется в БД — на
+                # следующих циклах сбора датасет для этого предмета уже не нужен.
+                # Локальная переменная nameid — иначе mypy не может проследить,
+                # что item.item_nameid уже не None после save_item_nameid()
+                # (баг найден и подтверждён Claude Code 17.07.2026).
+                if item.item_nameid is None:
+                    nameid = resolve_item_nameid(APP_ID_CS2, market_hash_name)
+                    save_item_nameid(session, item, nameid)
+                    session.commit()
+                else:
+                    nameid = item.item_nameid
+
+                # itemordershistogram вместо priceoverview: не требует cookie-
+                # разогрева и держит заметно больше запросов, не отдавая 429
+                # там, где priceoverview резал уже на первом десятке (см. разбор
+                # в чате от 17.07.2026). Собираем и храним в рублях — валюте,
+                # в которой Steam реально отдаёт данные этому аккаунту (see
+                # docs/SCOPE.md, запись от 15.07.2026). Конвертация в доллары —
+                # на стороне Analyzer, в момент использования, не здесь.
+                histogram = fetch_order_histogram(nameid, currency=RUB_CURRENCY_CODE)
             except (
                 SteamMarketError,
                 httpx.HTTPStatusError,
@@ -47,13 +63,14 @@ def collect_once() -> None:
                 time.sleep(REQUEST_DELAY_SECONDS)
                 continue
 
-            item = get_or_create_item(session, market_hash_name)
             save_price_snapshot(
                 session,
                 item,
-                overview.price,
-                overview.volume,
+                histogram.lowest_sell_order,
+                histogram.sell_order_count,
                 datetime.now(UTC).replace(tzinfo=None),
+                highest_buy_order=histogram.highest_buy_order,
+                buy_order_count=histogram.buy_order_count,
             )
             session.commit()
             time.sleep(REQUEST_DELAY_SECONDS)

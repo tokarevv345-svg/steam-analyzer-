@@ -17,6 +17,10 @@ class Base(DeclarativeBase):
 class SignalType(str, enum.Enum):
     FLIP = "flip"
     INVESTMENT = "investment"
+    # Мгновенный bid/ask арбитраж по стакану ордеров (itemordershistogram) —
+    # в отличие от FLIP/INVESTMENT не нужна история цен, только последний
+    # снепшот: highest_buy_order уже стоит в стакане прямо сейчас.
+    ARBITRAGE = "arbitrage"
 
 
 class Item(Base):
@@ -32,6 +36,11 @@ class Item(Base):
     stattrak: Mapped[bool] = mapped_column(default=False, nullable=False)
     rarity: Mapped[str] = mapped_column(nullable=False)
     image_url: Mapped[str | None] = mapped_column(nullable=True)
+    # Внутренний числовой ID предмета в Steam, нужен для itemordershistogram.
+    # Steam нигде не публикует таблицу соответствия — ID вшит в HTML страницы
+    # листинга, поэтому резолвится лениво при первом сборе цены и кэшируется
+    # здесь, чтобы не грузить эту страницу повторно на каждый цикл сбора.
+    item_nameid: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )
@@ -50,6 +59,16 @@ class PriceSnapshot(Base):
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     volume: Mapped[int | None] = mapped_column(nullable=True)
+    # Встречная сторона книги ордеров на момент снепшота — цена и число
+    # открытых buy-ордеров. Нужны для мгновенного bid/ask-арбитража
+    # (SignalType.ARBITRAGE); пока без фильтра по глубине стакана —
+    # сознательно отложено, см. обсуждение в чате от 17.07.2026: сперва
+    # накапливаем реальные buy_order_count/volume, порог фильтрации
+    # калибруем по факту, а не на глаз.
+    highest_buy_order: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2), nullable=True
+    )
+    buy_order_count: Mapped[int | None] = mapped_column(nullable=True)
     collected_at: Mapped[datetime] = mapped_column(nullable=False)
 
     item: Mapped[Item] = relationship(back_populates="price_snapshots")

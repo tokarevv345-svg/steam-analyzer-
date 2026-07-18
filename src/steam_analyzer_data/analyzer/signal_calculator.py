@@ -30,6 +30,13 @@ FLIP_DEVIATION_THRESHOLD = Decimal("0.05")
 
 SCORE_DECIMAL_PLACES = Decimal("0.0001")
 
+# Минимальный чистый профит (в % от цены покупки) для арбитраж-сигнала —
+# ЗАГЛУШКА, взята "на глаз", чтобы отсечь совсем незначащий/шумовой спред.
+# Пока БЕЗ фильтра по глубине стакана (buy_order_count/volume) — сознательно
+# отложено, см. обсуждение в чате от 17.07.2026: сначала копим реальные
+# данные по глубине, порог калибруем по факту, а не на глаз.
+MIN_ARBITRAGE_NET_PROFIT_PCT = Decimal("5")
+
 
 def _snapshots_since(session: Session, item_id: int, days: int) -> list[PriceSnapshot]:
     since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
@@ -196,6 +203,59 @@ def analyze_item(session: Session, item: Item, usd_rub_rate: Decimal) -> Signal 
         trend_score=trend,
         liquidity_factor=liquidity,
         volatility_penalty=volatility,
+    )
+    session.add(signal)
+    session.flush()
+    return signal
+
+
+def analyze_arbitrage(session: Session, item: Item) -> Signal | None:
+    """Мгновенный bid/ask арбитраж по последнему снепшоту книги ордеров:
+    highest_buy_order против price (lowest_sell_order) прямо сейчас. В
+    отличие от FLIP/INVESTMENT не смотрит в историю — оба ордера уже стоят
+    в стакане на момент снепшота, поэтому окно не нужно, достаточно одной
+    последней точки.
+
+    Пишет Signal только если highest_buy_order вообще есть на снепшоте (для
+    предметов, собранных до этого этапа, поле будет None) и чистый профит
+    после комиссии Steam не ниже MIN_ARBITRAGE_NET_PROFIT_PCT.
+
+    ВАЖНО: здесь нет проверки глубины стакана — тонкий стакан из одного
+    ордера даст точно такой же сигнал, как надёжный. Сознательно отложено,
+    см. docstring MIN_ARBITRAGE_NET_PROFIT_PCT.
+    """
+    latest = _latest_snapshots(session, item.id, limit=1)
+    if not latest:
+        return None
+    snapshot = latest[0]
+    if snapshot.highest_buy_order is None:
+        return None
+
+    buy_price = snapshot.price
+    sell_price = snapshot.highest_buy_order
+    if buy_price == 0:
+        return None
+
+    net_profit = sell_price * (1 - STEAM_FEE_RATE) - buy_price
+    profit_pct = (net_profit / buy_price * 100).quantize(Decimal("0.01"))
+
+    if profit_pct < MIN_ARBITRAGE_NET_PROFIT_PCT:
+        return None
+
+    signal = Signal(
+        item_id=item.id,
+        signal_type=SignalType.ARBITRAGE,
+        buy_price_suggested=buy_price,
+        sell_price_suggested=sell_price,
+        expected_profit_pct=profit_pct,
+        # Для арбитража score — это и есть profit_pct (единственная
+        # содержательная величина здесь): нет отдельных spread/liquidity/
+        # trend компонентов, как у FLIP, поэтому не сравним с ним напрямую.
+        score=profit_pct.quantize(SCORE_DECIMAL_PLACES),
+        spread_score=None,
+        trend_score=None,
+        liquidity_factor=None,
+        volatility_penalty=None,
     )
     session.add(signal)
     session.flush()

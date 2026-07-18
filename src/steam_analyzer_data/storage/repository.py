@@ -58,12 +58,22 @@ def get_or_create_item(session: Session, market_hash_name: str) -> Item:
     return item
 
 
+def save_item_nameid(session: Session, item: Item, item_nameid: int) -> None:
+    """Кэширует резолвнутый item_nameid на предмете, чтобы Collector не грузил
+    страницу листинга повторно на следующих циклах сбора (см. resolve_item_nameid
+    в steam_market_client.py)."""
+    item.item_nameid = item_nameid
+    session.flush()
+
+
 def save_price_snapshot(
     session: Session,
     item: Item,
     price: Decimal,
     volume: int | None,
     collected_at: datetime,
+    highest_buy_order: Decimal | None = None,
+    buy_order_count: int | None = None,
 ) -> PriceSnapshot | None:
     nearby_snapshot = session.scalar(
         select(PriceSnapshot)
@@ -81,6 +91,8 @@ def save_price_snapshot(
         item_id=item.id,
         price=price,
         volume=volume,
+        highest_buy_order=highest_buy_order,
+        buy_order_count=buy_order_count,
         collected_at=collected_at,
     )
     session.add(snapshot)
