@@ -148,7 +148,10 @@ class PriceOverview:
 @dataclass(frozen=True)
 class OrderHistogram:
     lowest_sell_order: Decimal
-    highest_buy_order: Decimal
+    # None — на стороне покупки сейчас нет открытых ордеров (легитимное
+    # состояние рынка для низколиквидных предметов, не ошибка). analyze_arbitrage()
+    # уже рассчитан на этот случай — возвращает None, ничего не пишет.
+    highest_buy_order: Decimal | None
     sell_order_count: int | None
     buy_order_count: int | None
 
@@ -327,19 +330,31 @@ def fetch_market_items(
         # живьём на count=1 и count=100 — оба раза в ответе pagesize=10, то есть
         # реальный размер страницы Steam выбирает сам. Поэтому ниже используется
         # не count, а len(results) — то, что реально пришло.
+        page_params: dict[str, str | int] = {
+            "query": "",
+            "appid": app_id,
+            "norender": 1,
+            "count": total - len(items),
+            "start": start,
+            "sort_column": sort_column,
+            "sort_dir": sort_dir,
+        }
         response = _get_with_backoff(
-            STEAM_MARKET_SEARCH_RENDER_URL,
-            {
-                "query": "",
-                "appid": app_id,
-                "norender": 1,
-                "count": total - len(items),
-                "start": start,
-                "sort_column": sort_column,
-                "sort_dir": sort_dir,
-            },
-            extra_headers=referer_headers,
+            STEAM_MARKET_SEARCH_RENDER_URL, page_params, extra_headers=referer_headers
         )
+
+        if response.status_code == 429:
+            # Ротация личности (см. _rotate_session_identity) могла сбросить
+            # cookies прямо перед этим запросом — search/render без них режется
+            # 429 (см. _ensure_session_warmed_up). Разогреваемся заново и пробуем
+            # эту же страницу ещё раз, вместо того чтобы терять уже накопленные
+            # items из-за одного неудачно совпавшего по времени запроса.
+            warmup_retry = _get_with_backoff(STEAM_MARKET_SEARCH_URL, {"appid": app_id})
+            warmup_retry.raise_for_status()
+            response = _get_with_backoff(
+                STEAM_MARKET_SEARCH_RENDER_URL, page_params, extra_headers=referer_headers
+            )
+
         response.raise_for_status()
         data = response.json()
 
@@ -473,7 +488,15 @@ def resolve_item_nameid(app_id: int, market_hash_name: str) -> int:
 def _parse_order_count_from_graph(order_graph: list[list[Any]] | None) -> int:
     if not order_graph:
         return 0
-    return int(order_graph[-1][1])
+    try:
+        return int(order_graph[-1][1])
+    except (IndexError, TypeError, ValueError) as exc:
+        # Как и остальные парсеры в модуле (_parse_price, _parse_market_search_item) —
+        # оборачиваем в понятную ошибку, а не роняем весь цикл сбора необработанным
+        # IndexError/TypeError на один неожиданно короткий/кривой ряд графика.
+        raise SteamMarketError(
+            f"Не удалось разобрать количество ордеров из order_graph: {order_graph!r}"
+        ) from exc
 
 
 def fetch_order_histogram(
@@ -486,7 +509,13 @@ def fetch_order_histogram(
     priceoverview уже режет (см. разбор в чате от 17.07.2026). Отдаёт сразу
     обе стороны книги ордеров одним запросом — реальную текущую цену продажи
     и реальную текущую цену покупки, а не приближение через историческую
-    медиану, как раньше."""
+    медиану, как раньше.
+
+    highest_buy_order может отсутствовать — это значит, что на покупку сейчас
+    нет открытых ордеров (легитимное состояние рынка для низколиквидных
+    предметов), а не ошибка. lowest_sell_order обязателен: без него нет вообще
+    никакой цены, которую можно записать (как и раньше — priceoverview точно
+    так же требовал lowest_price/median_price)."""
     params: dict[str, str | int] = {
         "country": "US",
         "language": "english",
@@ -497,18 +526,19 @@ def fetch_order_histogram(
     response.raise_for_status()
     data = response.json()
 
-    if (
-        not data.get("success")
-        or not data.get("lowest_sell_order")
-        or not data.get("highest_buy_order")
-    ):
+    if not data.get("success") or not data.get("lowest_sell_order"):
         raise SteamMarketError(
             f"Steam не вернул order histogram для item_nameid={item_nameid}"
         )
 
+    raw_highest_buy_order = data.get("highest_buy_order")
+    highest_buy_order = (
+        Decimal(str(raw_highest_buy_order)) / 100 if raw_highest_buy_order else None
+    )
+
     return OrderHistogram(
         lowest_sell_order=Decimal(str(data["lowest_sell_order"])) / 100,
-        highest_buy_order=Decimal(str(data["highest_buy_order"])) / 100,
+        highest_buy_order=highest_buy_order,
         sell_order_count=_parse_order_count_from_graph(data.get("sell_order_graph")),
         buy_order_count=_parse_order_count_from_graph(data.get("buy_order_graph")),
     )

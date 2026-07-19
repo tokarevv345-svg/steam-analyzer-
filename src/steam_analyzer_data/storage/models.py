@@ -87,7 +87,11 @@ class Signal(Base):
         Numeric(10, 2), nullable=False
     )
     expected_profit_pct: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
-    score: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False)
+    # Numeric(10, 4), не (6, 4): для FLIP score — взвешенная сумма компонентов
+    # (обычно небольшое число), но для ARBITRAGE это "сырой" profit_pct,
+    # который ничем сверху не ограничен — 99.9999 (старый предел) переполнялся
+    # уже на скромном арбитраже. Найдено ревью 19.07.2026 перед мержем в master.
+    score: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
     spread_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     trend_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     liquidity_factor: Mapped[Decimal | None] = mapped_column(

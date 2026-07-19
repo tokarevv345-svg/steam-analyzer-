@@ -67,7 +67,14 @@ def collect_once() -> None:
                 session,
                 item,
                 histogram.lowest_sell_order,
-                histogram.sell_order_count,
+                # volume=None: itemordershistogram не даёт торговый объём (сделок/день),
+                # только глубину стакана на текущий момент. histogram.sell_order_count —
+                # это "сколько лотов сейчас выставлено", а не "сколько продано" —
+                # calculate_liquidity_factor() в analyzer/signal_calculator.py трактует
+                # volume именно как объём сделок, так что писать сюда глубину стакана
+                # значило бы тихо портить liquidity_factor для FLIP/INVESTMENT. Найдено
+                # ревью 19.07.2026 перед мержем в master.
+                None,
                 datetime.now(UTC).replace(tzinfo=None),
                 highest_buy_order=histogram.highest_buy_order,
                 buy_order_count=histogram.buy_order_count,
