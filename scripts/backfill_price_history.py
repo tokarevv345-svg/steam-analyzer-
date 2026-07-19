@@ -11,15 +11,12 @@ import time
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-import httpx
-from dotenv import load_dotenv
-
 from src.steam_analyzer_data.collector.steam_market_client import (
-    DEFAULT_HEADERS,
     STEAM_MARKET_LISTING_URL,
     STEAM_MARKET_SEARCH_URL,
-    STEAM_PROXY_URL,
     SteamMarketError,
+    _client,
+    _get_with_backoff,
 )
 from src.steam_analyzer_data.scheduler.collection_job import APP_ID_CS2, TRACKED_ITEMS
 from src.steam_analyzer_data.storage.database import create_session_factory
@@ -28,25 +25,9 @@ from src.steam_analyzer_data.storage.repository import (
     save_price_snapshot,
 )
 
-load_dotenv()
-
 PRICEHISTORY_URL = "https://steamcommunity.com/market/pricehistory/"
-REQUEST_TIMEOUT_SECONDS = 15.0
 REQUEST_DELAY_SECONDS = 8.0
 DATE_FORMAT = "%b %d %Y %H: +0"
-
-# Backoff при 429 — то же самое поведение, что уже проверено в steam_market_client.py.
-MAX_RETRIES_ON_RATE_LIMIT = 3
-BASE_BACKOFF_SECONDS = 5.0
-
-# Свой клиент, а не голый httpx.get(): без системного прокси из реестра Windows
-# (trust_env=False), с браузерными заголовками и явным proxy= из .env.
-_client = httpx.Client(
-    timeout=REQUEST_TIMEOUT_SECONDS,
-    trust_env=False,
-    headers=DEFAULT_HEADERS,
-    proxy=STEAM_PROXY_URL,
-)
 
 
 def _parse_history_point(row: list[object]) -> tuple[datetime, Decimal, int]:
@@ -63,10 +44,12 @@ def _ensure_sessionid() -> None:
     # и молча отдаёт цены в валюте аккаунта (обнаружено: цены приходили в
     # рублях, ~76x завышены против USD), даже при валидном steamLoginSecure.
     # Настоящий браузер всегда шлёт sessionid вместе с login-cookie — здесь
-    # добираем его одним анонимным заходом, если его ещё нет в клиенте.
+    # добираем его одним анонимным заходом через общий _client, если его ещё
+    # нет (в том числе если ротация личности в steam_market_client.py только
+    # что сбросила cookies — см. _rotate_session_identity).
     if "sessionid" in _client.cookies:
         return
-    _client.get(STEAM_MARKET_SEARCH_URL)
+    _get_with_backoff(STEAM_MARKET_SEARCH_URL, {})
 
 
 def fetch_price_history(
@@ -83,15 +66,12 @@ def fetch_price_history(
     headers = {"Referer": listing_url}
     cookies = {"steamLoginSecure": cookie}
 
-    response = _client.get(PRICEHISTORY_URL, params=params, headers=headers, cookies=cookies)
-    for attempt in range(MAX_RETRIES_ON_RATE_LIMIT):
-        if response.status_code != 429:
-            break
-        backoff = BASE_BACKOFF_SECONDS * (2**attempt)
-        print(f"429 от Steam, попытка {attempt + 1}/{MAX_RETRIES_ON_RATE_LIMIT}, жду {backoff:.0f} сек")
-        time.sleep(backoff)
-        response = _client.get(PRICEHISTORY_URL, params=params, headers=headers, cookies=cookies)
-
+    # Через общий _get_with_backoff — тот же джиттер, backoff при 429 и
+    # ротация UA/cookies каждые 10 запросов, что и у автоматического
+    # Collector'а, вместо отдельной копии retry-цикла с теми же константами.
+    response = _get_with_backoff(
+        PRICEHISTORY_URL, params, extra_headers=headers, extra_cookies=cookies
+    )
     response.raise_for_status()
     data = response.json()
 

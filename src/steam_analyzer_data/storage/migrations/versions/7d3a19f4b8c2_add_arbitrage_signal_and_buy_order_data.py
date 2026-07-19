@@ -24,23 +24,13 @@ def upgrade() -> None:
     # Postgres 12, при условии что новое значение не используется в этой же
     # транзакции (здесь — не используется, только добавляется).
     #
-    # Идемпотентность: Postgres не поддерживает ALTER TYPE ... DROP VALUE,
-    # поэтому downgrade() этой же миграции не может убрать 'ARBITRAGE' обратно
-    # (см. комментарий в downgrade). Если БД когда-либо проходила upgrade и
-    # downgrade этой миграции, значение 'ARBITRAGE' в enum остаётся навсегда,
-    # и повторный upgrade падает с DuplicateObject. Проверяем через pg_enum
-    # перед ALTER TYPE, а не оборачиваем в DO $$ ... EXCEPTION $$ — у ALTER
-    # TYPE ... ADD VALUE есть собственные ограничения на выполнение внутри
-    # PL/pgSQL-блоков, конфликтующие с текущей транзакцией.
-    bind = op.get_bind()
-    already_exists = bind.execute(
-        sa.text(
-            "SELECT 1 FROM pg_enum WHERE enumlabel = 'ARBITRAGE' "
-            "AND enumtypid = 'signal_type'::regtype"
-        )
-    ).scalar()
-    if not already_exists:
-        op.execute("ALTER TYPE signal_type ADD VALUE 'ARBITRAGE'")
+    # IF NOT EXISTS (Postgres 9.6+, проект на postgres:16 — см. docker-compose.yml)
+    # даёт идемпотентность из коробки: Postgres не поддерживает ALTER TYPE ...
+    # DROP VALUE, поэтому downgrade() этой же миграции не может убрать
+    # 'ARBITRAGE' обратно (см. комментарий в downgrade) — при повторном
+    # upgrade() после такого downgrade значение уже есть, и без IF NOT EXISTS
+    # это упало бы с DuplicateObject.
+    op.execute("ALTER TYPE signal_type ADD VALUE IF NOT EXISTS 'ARBITRAGE'")
 
     op.add_column(
         "price_snapshots",

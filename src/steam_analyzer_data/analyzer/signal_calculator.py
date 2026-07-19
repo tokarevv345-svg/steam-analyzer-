@@ -127,6 +127,19 @@ def calculate_final_score(
     ).quantize(SCORE_DECIMAL_PLACES)
 
 
+def _net_profit_pct(buy_price: Decimal, sell_price: Decimal) -> Decimal | None:
+    """Чистый профит в % от цены покупки после комиссии Steam
+    (net_profit = sell_price*(1-STEAM_FEE_RATE) - buy_price) — общая формула
+    для FLIP (analyze_item) и ARBITRAGE (analyze_arbitrage), раньше была
+    продублирована в обеих функциях с чуть разными именами переменных.
+    None при buy_price == 0 (не с чем делить) — каждый вызывающий сам решает,
+    что делать в этом случае."""
+    if buy_price == 0:
+        return None
+    net_profit = sell_price * (1 - STEAM_FEE_RATE) - buy_price
+    return (net_profit / buy_price * 100).quantize(Decimal("0.01"))
+
+
 def _is_flip_deviation_confirmed(
     median_price: Decimal, latest_two: list[PriceSnapshot]
 ) -> bool:
@@ -187,17 +200,14 @@ def analyze_item(session: Session, item: Item, usd_rub_rate: Decimal) -> Signal 
 
     buy_price_usd = (current_price_rub / usd_rub_rate).quantize(Decimal("0.01"))
     sell_price_usd = (median_price_rub / usd_rub_rate).quantize(Decimal("0.01"))
-    net_profit = sell_price_usd * (1 - STEAM_FEE_RATE) - buy_price_usd
-    expected_profit_pct = (
-        (net_profit / buy_price_usd * 100) if buy_price_usd != 0 else Decimal("0")
-    )
+    expected_profit_pct = _net_profit_pct(buy_price_usd, sell_price_usd) or Decimal("0")
 
     signal = Signal(
         item_id=item.id,
         signal_type=SignalType.FLIP,
         buy_price_suggested=buy_price_usd,
         sell_price_suggested=sell_price_usd,
-        expected_profit_pct=expected_profit_pct.quantize(Decimal("0.01")),
+        expected_profit_pct=expected_profit_pct,
         score=score,
         spread_score=spread,
         trend_score=trend,
@@ -233,13 +243,9 @@ def analyze_arbitrage(session: Session, item: Item) -> Signal | None:
 
     buy_price = snapshot.price
     sell_price = snapshot.highest_buy_order
-    if buy_price == 0:
-        return None
 
-    net_profit = sell_price * (1 - STEAM_FEE_RATE) - buy_price
-    profit_pct = (net_profit / buy_price * 100).quantize(Decimal("0.01"))
-
-    if profit_pct < MIN_ARBITRAGE_NET_PROFIT_PCT:
+    profit_pct = _net_profit_pct(buy_price, sell_price)
+    if profit_pct is None or profit_pct < MIN_ARBITRAGE_NET_PROFIT_PCT:
         return None
 
     signal = Signal(

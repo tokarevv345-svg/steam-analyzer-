@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -64,6 +65,19 @@ def save_item_nameid(session: Session, item: Item, item_nameid: int) -> None:
     в steam_market_client.py)."""
     item.item_nameid = item_nameid
     session.flush()
+
+
+def ensure_item_nameid(session: Session, item: Item, resolve: Callable[[], int]) -> int:
+    """Аналог get_or_create_item, но для одного поля: если item_nameid уже
+    закэширован — возвращает его, не вызывая resolve(); если нет — резолвит
+    (через переданный колбэк, чтобы этот модуль не зависел от collector) и
+    кэширует. Раньше это был инлайновый if/else в collect_once() — вынесено
+    сюда, чтобы любой будущий вызывающий код не переписывал его заново."""
+    if item.item_nameid is not None:
+        return item.item_nameid
+    nameid = resolve()
+    save_item_nameid(session, item, nameid)
+    return nameid
 
 
 def save_price_snapshot(

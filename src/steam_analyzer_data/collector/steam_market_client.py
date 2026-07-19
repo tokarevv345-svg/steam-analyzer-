@@ -108,7 +108,11 @@ def _get_with_backoff(
     url: str,
     params: dict[str, str | int],
     extra_headers: dict[str, str] | None = None,
+    extra_cookies: dict[str, str] | None = None,
 ) -> httpx.Response:
+    # extra_cookies — для одноразовых per-request cookie вроде steamLoginSecure
+    # (scripts/backfill_price_history.py): передаётся напрямую в httpx на этот
+    # один запрос, не оседает в общем _client.cookies и не участвует в ротации.
     global _requests_since_session_start
 
     if _requests_since_session_start >= SESSION_ROTATION_REQUEST_COUNT:
@@ -116,7 +120,9 @@ def _get_with_backoff(
 
     for attempt in range(MAX_RETRIES_ON_RATE_LIMIT + 1):
         _wait_for_rate_limit()
-        response = _client.get(url, params=params, headers=extra_headers)
+        response = _client.get(
+            url, params=params, headers=extra_headers, cookies=extra_cookies
+        )
         _requests_since_session_start += 1
 
         if response.status_code != 429:
@@ -196,11 +202,9 @@ def _parse_price(raw_price: str) -> Decimal:
         raise SteamMarketError(f"Не удалось разобрать цену: {raw_price!r}") from exc
 
 
-def _parse_volume(raw_volume: str | int | None) -> int | None:
+def _parse_volume(raw_volume: str | None) -> int | None:
     if raw_volume is None:
         return None
-    if isinstance(raw_volume, int):
-        return raw_volume
     return int(raw_volume.replace(",", ""))
 
 

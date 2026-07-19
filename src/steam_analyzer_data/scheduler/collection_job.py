@@ -13,7 +13,7 @@ from ..collector.steam_market_client import (
     resolve_item_nameid,
 )
 from ..storage.database import create_session_factory
-from ..storage.repository import get_or_create_item, save_item_nameid, save_price_snapshot
+from ..storage.repository import ensure_item_nameid, get_or_create_item, save_price_snapshot
 
 APP_ID_CS2 = 730
 
@@ -36,15 +36,11 @@ def collect_once() -> None:
                 # item_nameid резолвится один раз на предмет (через сторонний
                 # датасет, см. resolve_item_nameid) и кэшируется в БД — на
                 # следующих циклах сбора датасет для этого предмета уже не нужен.
-                # Локальная переменная nameid — иначе mypy не может проследить,
-                # что item.item_nameid уже не None после save_item_nameid()
-                # (баг найден и подтверждён Claude Code 17.07.2026).
-                if item.item_nameid is None:
-                    nameid = resolve_item_nameid(APP_ID_CS2, market_hash_name)
-                    save_item_nameid(session, item, nameid)
-                    session.commit()
-                else:
-                    nameid = item.item_nameid
+                # ensure_item_nameid сам решает, нужен ли resolve() — коммитится
+                # вместе со снепшотом ниже, отдельного commit тут не нужно.
+                nameid = ensure_item_nameid(
+                    session, item, lambda: resolve_item_nameid(APP_ID_CS2, market_hash_name)
+                )
 
                 # itemordershistogram вместо priceoverview: не требует cookie-
                 # разогрева и держит заметно больше запросов, не отдавая 429
