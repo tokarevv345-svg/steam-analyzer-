@@ -12,6 +12,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from src.steam_analyzer_data.collector.steam_market_client import (
+    RUB_CURRENCY_CODE,
     STEAM_MARKET_LISTING_URL,
     STEAM_MARKET_SEARCH_URL,
     SteamMarketError,
@@ -40,13 +41,17 @@ def _parse_history_point(row: list[object]) -> tuple[datetime, Decimal, int]:
 
 
 def _ensure_sessionid() -> None:
-    # Без cookie sessionid Steam на pricehistory игнорирует параметр currency
-    # и молча отдаёт цены в валюте аккаунта (обнаружено: цены приходили в
-    # рублях, ~76x завышены против USD), даже при валидном steamLoginSecure.
-    # Настоящий браузер всегда шлёт sessionid вместе с login-cookie — здесь
-    # добираем его одним анонимным заходом через общий _client, если его ещё
-    # нет (в том числе если ротация личности в steam_market_client.py только
-    # что сбросила cookies — см. _rotate_session_identity).
+    # Раньше здесь было написано, что sessionid заставляет pricehistory уважать
+    # параметр currency. Проверено вживую 19.07.2026 (A/B на реальном
+    # pricehistory, со свежим steamLoginSecure): цена ОДИНАКОВАЯ что с
+    # sessionid, что без него — в обоих случаях в рублях, хотя currency=1
+    # (USD) запрошен явно. То есть заявление про sessionid было неверным —
+    # настоящая причина, почему pricehistory всегда отдаёт рубли для этого
+    # аккаунта, не установлена (возможно, валюта Steam-кошелька на стороне
+    # аккаунта просто переопределяет любой запрошенный currency). Сама
+    # функция оставлена — дешёвая (один анонимный запрос) и, возможно,
+    # нужна для чего-то другого на pricehistory, что не проверялось, — но
+    # её оригинальное обоснование недостоверно, не доверять ему.
     if "sessionid" in _client.cookies:
         return
     _get_with_backoff(STEAM_MARKET_SEARCH_URL, {})
@@ -61,7 +66,12 @@ def fetch_price_history(
     params: dict[str, str | int] = {
         "appid": app_id,
         "market_hash_name": market_hash_name,
-        "currency": 1,
+        # currency=1 (USD) запрашивался раньше, но реально Steam всегда
+        # отдаёт рубли для этого аккаунта независимо от параметра (см.
+        # _ensure_sessionid) — запрашиваем RUB_CURRENCY_CODE явно, чтобы
+        # код совпадал с тем, что реально происходит, и с тем, как хранит
+        # цены collect_once() (см. docs/SCOPE.md, запись от 15.07.2026).
+        "currency": RUB_CURRENCY_CODE,
     }
     headers = {"Referer": listing_url}
     cookies = {"steamLoginSecure": cookie}
